@@ -1,0 +1,8 @@
+{
+  "name": "AI Image Analyst and Editor",
+  "description": "An interactive image workspace where AI detects text, persons, and graphics, granting the user regional replacements and overlays.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
