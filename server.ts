@@ -84,7 +84,7 @@ For each component, map its precise relative bounding box on a percentage scale 
 - 'width' (span width percentage, 0-100)
 - 'height' (span height percentage, 0-100)
 
-Make sure coordinates are as accurate as possible. Return the list of elements as clean JSON structure conforming to the specified responseSchema. Ensure each item has a unique, descriptive ID (e.g., text_1, person_1, graphic_1).`,
+Make sure coordinates are as accurate as possible. Return the list of elements as clean JSON structure conforming to the specified responseSchema. Ensure each item has a unique, descriptive ID (e.[...]
       };
 
       const ai = getGenAI();
@@ -165,8 +165,8 @@ Make sure coordinates are as accurate as possible. Return the list of elements a
 The user is working with a specific template region:
 - Element Type: "${elementType}"
 - Visual Role: "${elementLabel}"
-${elementType === "text" ? `- Original Text: "${originalText || ""}"\n- Goal: Help rewrite, adapt, format, or translate text. When suggesting rewritten options, always end your bubble with a clearly marked "[APPLY: your proposed text]" tag, so the frontend UI can provide a 1-click apply button!` : "- Goal: Support image uploads or let the user generate custom graphic replacements. Users can type prompts like 'generate a cyberpunk lion logo' or 'make a cute dog avatar' to create new visuals."}
-
+${elementType === "text" ? `- Original Text: "${originalText || ""}"\n- Goal: Help rewrite, adapt, format, or translate text. When suggesting rewritten options, always end your bubble with a clea[...]
+      
 Keep your responses friendly, concise & visually engaging (approx 1-3 sentences). Do not use dry developer terminology. Speak direct to the user as their creative companion.`;
 
       const ai = getGenAI();
@@ -260,6 +260,193 @@ Keep your responses friendly, concise & visually engaging (approx 1-3 sentences)
       console.error("Image generation error:", e);
       return res.status(500).json({
         error: "Image Generation Failed",
+        details: e.message || String(e)
+      });
+    }
+  });
+
+  // Inpainting API endpoint: Remove person and reconstruct background
+  app.post("/api/inpaint-background", async (req, res) => {
+    try {
+      const { image, mask, boundingBox } = req.body;
+      if (!image || !mask || !boundingBox) {
+        return res.status(400).json({ error: "Missing 'image', 'mask', or 'boundingBox' in request body" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({
+          error: "API Key Required",
+          details: "Please define the GEMINI_API_KEY environment variable to use Inpainting features."
+        });
+      }
+
+      // Parse base64 images
+      let imageMimeType = "image/png";
+      let imageBase64 = image;
+      if (image.includes(";base64,")) {
+        const parts = image.split(";base64,");
+        imageMimeType = parts[0].replace("data:", "");
+        imageBase64 = parts[1];
+      }
+
+      let maskMimeType = "image/png";
+      let maskBase64 = mask;
+      if (mask.includes(";base64,")) {
+        const parts = mask.split(";base64,");
+        maskMimeType = parts[0].replace("data:", "");
+        maskBase64 = parts[1];
+      }
+
+      const ai = getGenAI();
+      
+      // Use Gemini's understanding to generate inpainting prompt
+      const inpaintPrompt = `आपको एक image दी गई है जहां एक person है।
+मुझे वह person हटाना है और background को intelligently reconstruct करना है।
+
+निर्देश:
+1. Person की जगह background को intelligently fill करें (जैसे कि वह person वहां कभी था ही नहीं)
+2. Background patterns और textures को naturally extend करें
+3. Surrounding environment को ध्यान में रखते हुए fill करें
+
+यह एक "inpainting" task है - person completely disappear होना चाहिए और background natural दिखना चाहिए।
+
+Image bounding box (% में):
+- X: ${boundingBox.x}%
+- Y: ${boundingBox.y}%
+- Width: ${boundingBox.width}%
+- Height: ${boundingBox.height}%
+
+कृपया इस region को intelligently fill करें और background को reconstruct करें।`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: [
+          {
+            inlineData: {
+              mimeType: imageMimeType,
+              data: imageBase64,
+            },
+          },
+          {
+            inlineData: {
+              mimeType: maskMimeType,
+              data: maskBase64,
+            },
+          },
+          {
+            text: inpaintPrompt,
+          }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              success: { type: Type.BOOLEAN, description: "Whether inpainting was successful" },
+              cleanedImage: { type: Type.STRING, description: "Base64 encoded image with person removed and background reconstructed" }
+            },
+            required: ["success", "cleanedImage"]
+          }
+        }
+      });
+
+      const text = response.text;
+      if (!text) {
+        throw new Error("Empty response from inpainting model");
+      }
+
+      const result = JSON.parse(text.trim());
+      
+      if (!result.success || !result.cleanedImage) {
+        // Fallback: return original image if inpainting failed
+        return res.json({ cleanedImage: image });
+      }
+
+      return res.json({ cleanedImage: result.cleanedImage });
+
+    } catch (e: any) {
+      console.error("Inpainting API error:", e);
+      return res.status(500).json({
+        error: "Inpainting Failed",
+        details: e.message || String(e)
+      });
+    }
+  });
+
+  // Content-aware fill endpoint
+  app.post("/api/content-aware-fill", async (req, res) => {
+    try {
+      const { image, boundingBox } = req.body;
+      if (!image || !boundingBox) {
+        return res.status(400).json({ error: "Missing 'image' or 'boundingBox' in request body" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({
+          error: "API Key Required",
+          details: "Please define the GEMINI_API_KEY environment variable."
+        });
+      }
+
+      let mimeType = "image/png";
+      let base64Data = image;
+      if (image.includes(";base64,")) {
+        const parts = image.split(";base64,");
+        mimeType = parts[0].replace("data:", "");
+        base64Data = parts[1];
+      }
+
+      const ai = getGenAI();
+      
+      const fillPrompt = `इस image के एक specific region को intelligently fill करना है।
+      
+बॉक्स coordinates (% में):
+- X: ${boundingBox.x}%
+- Y: ${boundingBox.y}%  
+- Width: ${boundingBox.width}%
+- Height: ${boundingBox.height}%
+
+कृपया इस region को surrounding context के अनुसार fill करें। यह एक content-aware fill operation है।`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: [
+          {
+            inlineData: {
+              mimeType,
+              data: base64Data,
+            },
+          },
+          {
+            text: fillPrompt,
+          }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              filledImage: { type: Type.STRING, description: "Base64 encoded image with region filled" }
+            },
+            required: ["filledImage"]
+          }
+        }
+      });
+
+      const text = response.text;
+      if (!text) {
+        return res.json({ filledImage: image });
+      }
+
+      const result = JSON.parse(text.trim());
+      return res.json({ filledImage: result.filledImage || image });
+
+    } catch (e: any) {
+      console.error("Content-aware fill error:", e);
+      return res.status(500).json({
+        error: "Fill Operation Failed",
         details: e.message || String(e)
       });
     }
